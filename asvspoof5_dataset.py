@@ -26,9 +26,7 @@ not covered by this loader — see the project notes on why.
 
 from __future__ import annotations
 
-import argparse
 import csv
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
@@ -370,68 +368,11 @@ def summarize_split(records: list[ASVspoofRecord], name: str) -> None:
     print(f"[{name}] codec conditions present: {codecs}")
 
 
-def _running_in_notebook() -> bool:
-    """True when executing inside Jupyter / Colab / IPython rather than a plain shell."""
-    if "ipykernel" in sys.modules or "google.colab" in sys.modules:
-        return True
-    try:
-        from IPython import get_ipython  # type: ignore
+if __name__ == "__main__":
+    import argparse
 
-        return get_ipython() is not None
-    except Exception:
-        return False
-
-
-def _strip_kernel_args(argv: list[str]) -> list[str]:
-    """
-    Remove the arguments Jupyter/Colab injects into sys.argv.
-
-    A notebook kernel is launched as:
-        colab_kernel_launcher.py -f /root/.../kernel-1234.json
-    Left in place, '-f' makes argparse abort with SystemExit: 2, and the
-    kernel .json path gets swallowed as the tsv_path positional.
-    """
-    cleaned: list[str] = []
-    skip_next = False
-    for arg in argv:
-        if skip_next:
-            skip_next = False
-            continue
-        if arg == "-f":
-            skip_next = True
-            continue
-        if arg.startswith("-f=") or arg.startswith("--f="):
-            continue
-        if arg.endswith(".json") and "kernel" in Path(arg).name:
-            continue
-        cleaned.append(arg)
-    return cleaned
-
-
-NOTEBOOK_HELP = """\
-No tsv_path given.
-
-Running the CLI directly inside a notebook cell doesn't work, because the cell
-inherits the kernel's own arguments. Do one of these instead:
-
-  1) Run it as a real script from a shell cell:
-       !python asvspoof5_spectrograms.py "/content/ASVspoof5.dev.track_1.tsv" \\
-            --audio-dir /content/flac --out-dir /content/spectrograms --export-n 16
-
-  2) Call main() with an explicit argument list:
-       main(["/content/ASVspoof5.dev.track_1.tsv", "--audio-dir", "/content/flac"])
-
-  3) Skip the CLI and use the functions:
-       recs = parse_protocol_file(tsv)
-       summarize_split(recs, name="dev.track_1")
-       generate_spectrograms(protocol_path=tsv, audio_dir="/content/flac")
-"""
-
-
-def build_parser() -> "argparse.ArgumentParser":
     parser = argparse.ArgumentParser(
-        prog="asvspoof5_spectrograms.py",
-        description="Inspect ASVspoof5 protocol files and generate spectrograms",
+        description="Inspect ASVspoof5 protocol files and generate spectrograms"
     )
     parser.add_argument("tsv_path", help="Path to a protocol .tsv file")
     parser.add_argument(
@@ -460,52 +401,15 @@ def build_parser() -> "argparse.ArgumentParser":
         action="store_true",
         help="Do not write PNG images (use with --save-pt)",
     )
-    return parser
+    args = parser.parse_args()
 
-
-def main(argv: Optional[list[str]] = None) -> int:
-    """
-    Entry point. Safe to call from a notebook:
-
-        main(["/content/ASVspoof5.dev.track_1.tsv", "--audio-dir", "/content/flac"])
-
-    With argv=None the real command line is used, minus any kernel arguments.
-    """
-    in_notebook = _running_in_notebook()
-    if argv is None:
-        argv = _strip_kernel_args(sys.argv[1:])
-
-    if not argv and in_notebook:
-        print(NOTEBOOK_HELP)
-        return 0
-
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    tsv_path = Path(args.tsv_path)
-    if not tsv_path.is_file():
-        print(f"Protocol file not found: {tsv_path}")
-        return 1
-
-    recs = parse_protocol_file(tsv_path)
-    summarize_split(recs, name=tsv_path.stem)
-    if not recs:
-        print(
-            f"No valid rows parsed from {tsv_path}. Expected 10 space-separated "
-            "columns per line (Track-1 protocol format)."
-        )
-        return 1
-
-    audio_dir = Path(args.audio_dir)
-    if not audio_dir.is_dir():
-        print(f"Audio directory not found: {audio_dir}")
-        print("Protocol .tsv files are metadata only. Parser check finished.")
-        return 0
+    recs = parse_protocol_file(args.tsv_path)
+    summarize_split(recs, name=Path(args.tsv_path).stem)
 
     try:
         generate_spectrograms(
-            protocol_path=tsv_path,
-            audio_dir=audio_dir,
+            protocol_path=args.tsv_path,
+            audio_dir=args.audio_dir,
             out_dir=args.out_dir,
             max_n=args.export_n,
             save_png=not args.no_png,
@@ -514,11 +418,3 @@ def main(argv: Optional[list[str]] = None) -> int:
     except ValueError as e:
         print(e)
         print("Parser check finished. Add .flac files to generate spectrograms.")
-    return 0
-
-
-if __name__ == "__main__":
-    exit_code = main()
-    # Don't raise SystemExit inside a notebook — it shows up as an ugly traceback.
-    if not _running_in_notebook():
-        sys.exit(exit_code)
