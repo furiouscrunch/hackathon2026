@@ -34,6 +34,16 @@ from typing import Literal, Optional
 import torch
 from torch.utils.data import Dataset
 
+from features import (
+    FEATURE_SHAPE,
+    HOP_LENGTH,
+    N_FFT,
+    SAMPLE_RATE,
+    WIN_LENGTH,
+    WINDOW_SECONDS,
+    LogLinearSpectrogram,
+)
+
 try:
     import torchaudio
     from torchaudio.transforms import AmplitudeToDB, MelSpectrogram
@@ -104,10 +114,37 @@ class LogMelSpectrogram:
         return spec
 
 
+def _decode_audio(audio_path: Path) -> tuple[torch.Tensor, int]:
+    """
+    Decode an audio file to (waveform [1, T] float32, sample_rate).
+
+    torchaudio.load() routes through torchcodec on torchaudio 2.11+ (the default
+    on Python 3.13/3.14), which needs FFmpeg's shared libraries at runtime and
+    raises ImportError/RuntimeError when they are absent - the common case on a
+    fresh macOS or Windows machine. Fall back to soundfile, which ships its own
+    libsndfile and has no system-level dependency.
+    """
+    try:
+        waveform, sr = torchaudio.load(str(audio_path))
+        return waveform, sr
+    except Exception:
+        try:
+            import soundfile as sf
+        except ImportError as e:
+            raise RuntimeError(
+                f"Could not decode {audio_path}: torchaudio.load() failed and "
+                "soundfile is not installed. Install it with: pip install soundfile"
+            ) from e
+        data, sr = sf.read(str(audio_path), dtype="float32", always_2d=True)
+        # soundfile gives [frames, channels]; torchaudio's convention is [channels, frames]
+        waveform = torch.from_numpy(data).transpose(0, 1).contiguous()
+        return waveform, sr
+
+
 def parse_protocol_file(tsv_path: str | Path) -> list[ASVspoofRecord]:
     """Parse a train/dev/eval Track-1 protocol .tsv into a list of records."""
     records = []
-    with open(tsv_path, "r", newline="") as f:
+    with open(tsv_path, "r", newline="", encoding="utf-8") as f:
         reader = csv.reader(f, delimiter=" ")
         for row in reader:
             if not row or len(row) < 9:
@@ -145,8 +182,11 @@ class ASVspoof5Dataset(Dataset):
     protocol_path : path to the .tsv protocol file (train / dev_track_1 / eval_track_1)
     audio_dir : directory containing the actual .flac audio files
     sample_rate : target sample rate to resample to (default 16000, standard for speech models)
-    max_duration_s : if set, audio is center-cropped/padded to this many seconds,
-                      so batches have uniform length (useful for CNN/streaming models)
+    max_duration_s : if set, audio is center-cropped/padded to this many seconds.
+                      Defaults to 1.0 s to match what CallAudioCapture emits on
+                      the phone - train on the same window length you deploy on.
+    feature : 'linear' (default) log linear-magnitude spectrogram [1, 257, 63],
+              identical to the live capture path; 'mel' for the legacy log-mel
     transform : optional callable applied after spectrogram (or after waveform if
                 return_type='waveform'). Use this for extra augmentation.
     audio_ext : file extension of the audio files (default '.flac', ASVspoof5's native format)
@@ -161,13 +201,14 @@ class ASVspoof5Dataset(Dataset):
         protocol_path: str | Path,
         audio_dir: str | Path,
         sample_rate: int = 16000,
-        max_duration_s: Optional[float] = 4.0,
+        max_duration_s: Optional[float] = WINDOW_SECONDS,
         transform=None,
         audio_ext: str = ".flac",
         return_type: Literal["spectrogram", "waveform", "both"] = "spectrogram",
-        n_fft: int = 512,
-        hop_length: int = 160,
-        win_length: int = 400,
+        feature: Literal["linear", "mel"] = "linear",
+        n_fft: int = N_FFT,
+        hop_length: int = HOP_LENGTH,
+        win_length: int = WIN_LENGTH,
         n_mels: int = 80,
         f_min: float = 20.0,
         f_max: Optional[float] = 8000.0,
@@ -181,15 +222,28 @@ class ASVspoof5Dataset(Dataset):
         self.return_type = return_type
         self.skip_missing = skip_missing
         self._audio_index = self._build_audio_index()
-        self.spectrogram_fn = LogMelSpectrogram(
-            sample_rate=sample_rate,
-            n_fft=n_fft,
-            hop_length=hop_length,
-            win_length=win_length,
-            n_mels=n_mels,
-            f_min=f_min,
-            f_max=f_max,
-        )
+        self.feature = feature
+        if feature == "linear":
+            # Default. Matches the live capture path exactly - see features.py.
+            self.spectrogram_fn = LogLinearSpectrogram(
+                n_fft=n_fft,
+                hop_length=hop_length,
+                win_length=win_length,
+            )
+        elif feature == "mel":
+            # Opt-in only. Mel spacing smears the high band where vocoder
+            # artifacts live, and the on-device path does not implement it.
+            self.spectrogram_fn = LogMelSpectrogram(
+                sample_rate=sample_rate,
+                n_fft=n_fft,
+                hop_length=hop_length,
+                win_length=win_length,
+                n_mels=n_mels,
+                f_min=f_min,
+                f_max=f_max,
+            )
+        else:
+            raise ValueError(f"feature must be 'linear' or 'mel', got {feature!r}")
 
         records = parse_protocol_file(protocol_path)
         if skip_missing:
@@ -228,7 +282,7 @@ class ASVspoof5Dataset(Dataset):
                 "Make sure you've downloaded the actual ASVspoof5 audio "
                 "(these .tsv files are metadata only) and pointed audio_dir at it."
             )
-        waveform, sr = torchaudio.load(str(audio_path))
+        waveform, sr = _decode_audio(audio_path)
 
         # Mono-ize (most ASVspoof audio is already mono, but be defensive)
         if waveform.shape[0] > 1:

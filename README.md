@@ -9,22 +9,48 @@ An end-to-end pipeline for AI voice scam detection, covering:
 ## 1. Environment & Dependencies Setup
 
 ### Prerequisites
-- **macOS** (Apple Silicon supported)
-- **FFmpeg**: Required for audio filtering and codec transformations.
+- **macOS** (Apple Silicon supported) or **Windows 10/11**
+- **FFmpeg**: Required for audio filtering and codec transformations. Must be on `PATH`.
 - **Python Virtual Environment (`.venv`)**: Python 3.9–3.14.
 
-### Setup Commands
+### Setup Commands (macOS / Linux)
 
 ```bash
 # 1. Install FFmpeg (system package)
-brew install ffmpeg
+brew install ffmpeg          # macOS
+# sudo apt install ffmpeg    # Debian/Ubuntu
 
-# 2. Activate Python virtual environment
+# 2. Create and activate Python virtual environment
+python3 -m venv .venv
 source .venv/bin/activate
 
 # 3. Install required Python packages
-pip install torch torchaudio matplotlib soundfile
+pip install -r requirements.txt
 ```
+
+### Setup Commands (Windows — PowerShell)
+
+```powershell
+# 1. Install FFmpeg (adds it to PATH automatically)
+winget install --id Gyan.FFmpeg -e
+#    Alternatives: `choco install ffmpeg`, or download from
+#    https://ffmpeg.org/download.html and add the bin\ folder to PATH.
+#    Open a NEW terminal afterwards, then verify:
+ffmpeg -version
+
+# 2. Create and activate Python virtual environment
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+#    If activation is blocked by execution policy, run once:
+#    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+
+# 3. Install required Python packages
+pip install -r requirements.txt
+```
+
+> On Windows, use `python` instead of `python3` in the commands below, and
+> activate the venv with `.\.venv\Scripts\Activate.ps1` instead of `source .venv/bin/activate`.
+> Multi-line commands shown with a trailing `\` need a backtick `` ` `` in PowerShell, or just write them on one line.
 
 ---
 
@@ -154,9 +180,9 @@ print("Batch labels shape:", batch["label"].shape)              # [32] (0=bonafi
 
 ## 5. Engineering & Technical Solutions Implemented
 
-1. **Python 3.14 / macOS Torchaudio Dylib Fix**:
-   - In Torchaudio 2.11+ under Python 3.14, `torchaudio.load()` defaults to `torchcodec`, which crashed due to missing external FFmpeg dynamic shared libraries (`libavutil`).
-   - **Solution**: Implemented an automated `soundfile` fallback in `_load_waveform()` so audio decodes reliably directly into PyTorch tensors without system-level dylib dependencies.
+1. **Python 3.14 Torchaudio Decoder Fix (macOS & Windows)**:
+   - In Torchaudio 2.11+ under Python 3.13/3.14, `torchaudio.load()` routes through `torchcodec`, which fails when FFmpeg's shared libraries are missing (`libavutil` on macOS, the FFmpeg DLLs on Windows).
+   - **Solution**: `_decode_audio()` wraps `torchaudio.load()` and falls back to `soundfile` (which bundles its own `libsndfile`), so audio decodes into PyTorch tensors with no system-level library dependency.
 2. **FFmpeg Resampling Engine Compatibility**:
    - Homebrew's FFmpeg on macOS does not bundle `libsoxr` by default, causing `:resampler=soxr` to fail.
    - **Solution**: Updated the filter chain to `aresample=8000`, using FFmpeg's native `libswresample` engine.
@@ -170,12 +196,18 @@ print("Batch labels shape:", batch["label"].shape)              # [32] (0=bonafi
 ```
 hackathon/
 ├── README.md                     # This consolidated guide
+├── requirements.txt              # Python dependencies
 ├── phone_call_effect.py          # Telephony audio degradation CLI tool
-├── asvspoof5_spectrograms.py     # Protocol parser & log-mel spectrogram generator
-├── audio/                        # Clean source audio
-│   ├── *.mp3 / *.wav             # Indian accent demo audio recordings
+├── asvspoof5_spectrograms.py     # Protocol parser & log-mel spectrogram generator (CLI)
+├── asvspoof5_dataset.py          # Library-only copy of the same parser/Dataset
+├── .venv/                        # Local virtual environment (not committed)
+├── my-folder/                    # Clean source audio (demo .mp3 / .wav recordings)
+├── audio/                        # Expected location for ASVspoof5 audio
 │   └── flac_D/                   # ASVspoof5 development set (.flac files)
 ├── audio_phone_call/             # Output folder for phone-degraded audio
 ├── ASVspoof5_protocols/          # Official ASVspoof5 protocol .tsv metadata
 └── spectrograms/                 # Output folder for generated spectrograms (.png / .pt)
 ```
+
+> The demo recordings currently live in `my-folder/`, not `audio/`. Either rename the
+> folder or pass the real path, e.g. `python phone_call_effect.py my-folder -o audio_phone_call`.

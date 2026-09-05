@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -36,12 +37,28 @@ FILTER_CHAIN = (
 )
 
 
+FFMPEG_MISSING_MSG = """ffmpeg was not found on PATH. Install it, open a NEW terminal, then retry:
+  Windows: winget install --id Gyan.FFmpeg -e   (or: choco install ffmpeg)
+  macOS:   brew install ffmpeg
+  Linux:   sudo apt install ffmpeg
+Verify with: ffmpeg -version"""
+
+
+def require_ffmpeg():
+    """Fail with an actionable message instead of a bare FileNotFoundError."""
+    if shutil.which("ffmpeg") is None:
+        sys.exit(FFMPEG_MISSING_MSG)
+
+
 def run_ffmpeg(args):
-    result = subprocess.run(
-        ["ffmpeg", "-y", *args],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", *args],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        sys.exit(FFMPEG_MISSING_MSG)
     if result.returncode != 0:
         print(result.stderr, file=sys.stderr)
         raise RuntimeError("ffmpeg failed - see error output above")
@@ -100,6 +117,8 @@ def main():
     parser.add_argument("--recursive", action="store_true", help="Recursively process subdirectories")
     args = parser.parse_args()
 
+    require_ffmpeg()
+
     input_path = Path(args.input)
     if not input_path.exists():
         sys.exit(f"Input path not found: {input_path}")
@@ -113,7 +132,7 @@ def main():
         pattern = "**/*" if args.recursive else "*"
         audio_files = [
             f for f in input_path.glob(pattern)
-            if f.is_file() and f.suffix.lower() in supported_exts and not f.name.endswith(("_bandlimited.wav", "_mulaw.wav"))
+            if f.is_file() and f.suffix.lower() in supported_exts and not f.name.endswith(("_bandlimited.wav", "_mulaw.wav", "_mulaw_encoded.wav"))
         ]
         if not audio_files:
             sys.exit(f"No audio files found in directory: {input_path}")

@@ -1,0 +1,6 @@
+# Install with: pip install -r requirements.txt
+# (activate the venv first - see README section 1)
+torch
+torchaudio
+matplotlib
+soundfile
